@@ -96,13 +96,6 @@ class BazelWorkerDriver {
       var futureWorker = _spawnWorker();
       _spawningWorkers.add(futureWorker);
       futureWorker.then((worker) {
-        worker.stderr
-            .transform(UTF8.decoder)
-            .transform(const LineSplitter())
-            .listen((line) {
-          stderr.writeln('StdErr from worker ${worker.pid}: $line');
-        });
-
         _spawningWorkers.remove(futureWorker);
         _readyWorkers.add(worker);
 
