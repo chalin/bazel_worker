@@ -110,7 +110,9 @@ class BazelWorkerDriver {
         // there is more work to be done. This is primarily just a defensive
         // thing but is cheap to do.
         worker.exitCode.then((exitCode) {
+          _idleWorkers.remove(worker);
           _readyWorkers.remove(worker);
+          _spawningWorkers.remove(worker);
           _runWorkQueue();
         });
       });
@@ -131,35 +133,41 @@ class BazelWorkerDriver {
 
       // It is possible for us to complete with an error response due to an
       // unhandled async error before we get here.
-      if (!_responseCompleters[response].isCompleted) {
+      if (_responseCompleters[response]?.isCompleted == false) {
         _responseCompleters[request].complete(response);
-      }
-
-      // Do additional work if available.
-      _idleWorkers.add(worker);
-      _runWorkQueue();
-
-      // If the worker wasn't immediately used we might have to many idle
-      // workers now, kill one if necessary.
-      if (_idleWorkers.length > _maxIdleWorkers) {
-        // Note that whenever we spawn a worker we listen for its exit code
-        // and clean it up so we don't need to do that here.
-        var worker = _idleWorkers.removeLast();
-        _readyWorkers.remove(worker);
-        worker.kill();
       }
     }, onError: (e, s) {
       // Note that we don't need to do additional cleanup here on failures. If
       // the worker dies that is already handled in a generic fashion, we just
       // need to make sure we complete with a valid response.
-      if (!_responseCompleters[request].isCompleted) {
+      if (_responseCompleters[request]?.isCompleted == false) {
         var response = new WorkResponse()
           ..exitCode = EXIT_CODE_ERROR
           ..output = 'Error running worker:\n$e\n$s';
         _responseCompleters[request].complete(response);
       }
     });
-    return _responseCompleters[request].future;
+    return _responseCompleters[request].future
+      ..whenComplete(() {
+        // If the worker crashes, it won't be in `_readyWorkers` any more, and
+        // we don't want to add it to _idleWorkers.
+        if (_readyWorkers.contains(worker)) {
+          _idleWorkers.add(worker);
+        }
+
+        // Do additional work if available.
+        _runWorkQueue();
+
+        // If the worker wasn't immediately used we might have to many idle
+        // workers now, kill one if necessary.
+        if (_idleWorkers.length > _maxIdleWorkers) {
+          // Note that whenever we spawn a worker we listen for its exit code
+          // and clean it up so we don't need to do that here.
+          var worker = _idleWorkers.removeLast();
+          _readyWorkers.remove(worker);
+          worker.kill();
+        }
+      });
   }
 }
 
