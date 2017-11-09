@@ -123,12 +123,17 @@ class BazelWorkerDriver {
   ///
   /// Once the worker responds then it will be added back to the pool of idle
   /// workers.
-  Future _runWorker(Process worker, WorkRequest request) async {
-    try {
+  Future _runWorker(Process worker, WorkRequest request) {
+    runZoned(() async {
       var connection = _workerConnections[worker];
       connection.writeRequest(request);
       var response = await connection.readResponse();
-      _responseCompleters[request].complete(response);
+
+      // It is possible for us to complete with an error response due to an
+      // unhandled async error before we get here.
+      if (!_responseCompleters[response].isCompleted) {
+        _responseCompleters[request].complete(response);
+      }
 
       // Do additional work if available.
       _idleWorkers.add(worker);
@@ -143,7 +148,7 @@ class BazelWorkerDriver {
         _readyWorkers.remove(worker);
         worker.kill();
       }
-    } catch (e, s) {
+    }, onError: (e, s) {
       // Note that we don't need to do additional cleanup here on failures. If
       // the worker dies that is already handled in a generic fashion, we just
       // need to make sure we complete with a valid response.
@@ -153,7 +158,8 @@ class BazelWorkerDriver {
           ..output = 'Error running worker:\n$e\n$s';
         _responseCompleters[request].complete(response);
       }
-    }
+    });
+    return _responseCompleters[request].future;
   }
 }
 
