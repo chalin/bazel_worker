@@ -37,21 +37,24 @@ class BazelWorkerDriver {
   final _spawningWorkers = <Future<Process>>[];
 
   /// Work requests that haven't been started yet.
-  final _workQueue = new Queue<WorkRequest>();
+  final _workQueue = new Queue<WorkAttempt>();
 
   /// Factory method that spawns a worker process.
   final SpawnWorker _spawnWorker;
 
-  BazelWorkerDriver(this._spawnWorker, {int maxIdleWorkers, int maxWorkers})
+  final int _maxRetries;
+
+  BazelWorkerDriver(this._spawnWorker,
+      {int maxIdleWorkers, int maxWorkers, int maxRetries})
       : this._maxIdleWorkers = 1, // maxIdleWorkers ?? 4,
-        this._maxWorkers = 1; // maxWorkers ?? 4;
+        this._maxWorkers = 1, // maxWorkers ?? 4;
+        this._maxRetries = maxRetries ?? 4;
 
   Future<WorkResponse> doWork(WorkRequest request) {
-    var responseCompleter = new Completer<WorkResponse>();
-    _responseCompleters[request] = responseCompleter;
-    _workQueue.add(request);
+    var attempt = new WorkAttempt(request);
+    _workQueue.add(attempt);
     _runWorkQueue();
-    return responseCompleter.future;
+    return attempt.response;
   }
 
   /// Calls `kill` on all worker processes.
@@ -84,9 +87,9 @@ class BazelWorkerDriver {
 
     // At this point we definitely want to run a task, we just need to decide
     // whether or not we need to start up a new worker.
-    var request = _workQueue.removeFirst();
+    var attempt = _workQueue.removeFirst();
     if (_idleWorkers.isNotEmpty) {
-      _runWorker(_idleWorkers.removeLast(), request);
+      _runWorker(_idleWorkers.removeLast(), attempt);
     } else {
       // No need to block here, we want to continue to synchronously drain the
       // work queue.
@@ -104,7 +107,7 @@ class BazelWorkerDriver {
         _readyWorkers.add(worker);
 
         _workerConnections[worker] = new StdDriverConnection.forWorker(worker);
-        _runWorker(worker, request);
+        _runWorker(worker, attempt);
 
         // When the worker exits we should retry running the work queue in case
         // there is more work to be done. This is primarily just a defensive
@@ -125,58 +128,85 @@ class BazelWorkerDriver {
   ///
   /// Once the worker responds then it will be added back to the pool of idle
   /// workers.
-  Future _runWorker(Process worker, WorkRequest request) {
+  void _runWorker(Process worker, WorkAttempt attempt) {
+    bool rescheduled = false;
+
+    bool tryReschedule() {
+      if (rescheduled) return false;
+      if (attempt.numRetries >= _maxRetries) return false;
+      stderr.writeln('Rescheduling request ${attempt.request}');
+      rescheduled = true;
+      attempt.numRetries++;
+      _workQueue.add(attempt);
+      _runWorkQueue();
+      return true;
+    }
+
+    void cleanUp() {
+      // If the worker crashes, it won't be in `_readyWorkers` any more, and
+      // we don't want to add it to _idleWorkers.
+      if (_readyWorkers.contains(worker)) {
+        _idleWorkers.add(worker);
+      }
+
+      // Do additional work if available.
+      _runWorkQueue();
+
+      // If the worker wasn't immediately used we might have to many idle
+      // workers now, kill one if necessary.
+      if (_idleWorkers.length > _maxIdleWorkers) {
+        // Note that whenever we spawn a worker we listen for its exit code
+        // and clean it up so we don't need to do that here.
+        var worker = _idleWorkers.removeLast();
+        _readyWorkers.remove(worker);
+        worker.kill();
+      }
+    }
+
     runZoned(() async {
       var connection = _workerConnections[worker];
-      connection.writeRequest(request);
+      connection.writeRequest(attempt.request);
       var response = await connection.readResponse();
 
       // It is possible for us to complete with an error response due to an
       // unhandled async error before we get here.
-      if (_responseCompleters[request]?.isCompleted == false) {
+      if (!attempt.responseCompleter.isCompleted) {
         if (response == null) {
+          if (tryReschedule()) return;
           response = new WorkResponse()
             ..exitCode = EXIT_CODE_ERROR
             ..output =
                 'Invalid response from worker, this probably means it wrote '
                 'invalid output or died.';
         }
-        _responseCompleters[request].complete(response);
+        attempt.responseCompleter.complete(response);
+        cleanUp();
       }
     }, onError: (e, s) {
       // Note that we don't need to do additional cleanup here on failures. If
       // the worker dies that is already handled in a generic fashion, we just
       // need to make sure we complete with a valid response.
-      if (_responseCompleters[request]?.isCompleted == false) {
+      if (!attempt.responseCompleter.isCompleted) {
+        if (tryReschedule()) return;
         var response = new WorkResponse()
           ..exitCode = EXIT_CODE_ERROR
           ..output = 'Error running worker:\n$e\n$s';
-        _responseCompleters[request].complete(response);
+        attempt.responseCompleter.complete(response);
+        cleanUp();
       }
     });
-    return _responseCompleters[request].future
-      ..whenComplete(() {
-        // If the worker crashes, it won't be in `_readyWorkers` any more, and
-        // we don't want to add it to _idleWorkers.
-        if (_readyWorkers.contains(worker)) {
-          _idleWorkers.add(worker);
-        }
-
-        // Do additional work if available.
-        _runWorkQueue();
-
-        // If the worker wasn't immediately used we might have to many idle
-        // workers now, kill one if necessary.
-        if (_idleWorkers.length > _maxIdleWorkers) {
-          // Note that whenever we spawn a worker we listen for its exit code
-          // and clean it up so we don't need to do that here.
-          var worker = _idleWorkers.removeLast();
-          _readyWorkers.remove(worker);
-          worker.kill();
-        }
-      });
   }
 }
 
-final _responseCompleters = new Expando<Completer<WorkResponse>>('response');
-final _workerConnections = new Expando<DriverConnection>('connectin');
+final _workerConnections = new Expando<DriverConnection>('connection');
+
+class WorkAttempt {
+  final WorkRequest request;
+  final responseCompleter = new Completer<WorkResponse>();
+
+  Future<WorkResponse> get response => responseCompleter.future;
+
+  int numRetries = 0;
+
+  WorkAttempt(this.request);
+}
