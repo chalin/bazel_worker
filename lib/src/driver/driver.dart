@@ -4,6 +4,7 @@
 
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 
 import '../constants.dart';
@@ -92,6 +93,13 @@ class BazelWorkerDriver {
       var futureWorker = _spawnWorker();
       _spawningWorkers.add(futureWorker);
       futureWorker.then((worker) {
+        worker.stderr
+            .transform(UTF8.decoder)
+            .transform(const LineSplitter())
+            .listen((line) {
+          stderr.writeln('StdErr from worker ${worker.pid}: $line');
+        });
+
         _spawningWorkers.remove(futureWorker);
         _readyWorkers.add(worker);
 
@@ -101,7 +109,7 @@ class BazelWorkerDriver {
         // When the worker exits we should retry running the work queue in case
         // there is more work to be done. This is primarily just a defensive
         // thing but is cheap to do.
-        worker.exitCode.then((_) {
+        worker.exitCode.then((exitCode) {
           _readyWorkers.remove(worker);
           _runWorkQueue();
         });
