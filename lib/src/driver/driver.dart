@@ -43,8 +43,8 @@ class BazelWorkerDriver {
   final SpawnWorker _spawnWorker;
 
   BazelWorkerDriver(this._spawnWorker, {int maxIdleWorkers, int maxWorkers})
-      : this._maxIdleWorkers = maxIdleWorkers ?? 4,
-        this._maxWorkers = maxWorkers ?? 4;
+      : this._maxIdleWorkers = 1, // maxIdleWorkers ?? 4,
+        this._maxWorkers = 1; // maxWorkers ?? 4;
 
   Future<WorkResponse> doWork(WorkRequest request) {
     var responseCompleter = new Completer<WorkResponse>();
