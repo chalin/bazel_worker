@@ -133,7 +133,14 @@ class BazelWorkerDriver {
 
       // It is possible for us to complete with an error response due to an
       // unhandled async error before we get here.
-      if (_responseCompleters[response]?.isCompleted == false) {
+      if (_responseCompleters[request]?.isCompleted == false) {
+        if (response == null) {
+          response = new WorkResponse()
+            ..exitCode = EXIT_CODE_ERROR
+            ..output =
+                'Invalid response from worker, this probably means it wrote '
+                'invalid output or died.';
+        }
         _responseCompleters[request].complete(response);
       }
     }, onError: (e, s) {
