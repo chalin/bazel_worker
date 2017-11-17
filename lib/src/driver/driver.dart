@@ -125,9 +125,12 @@ class BazelWorkerDriver {
     bool rescheduled = false;
 
     bool tryReschedule() {
-      if (rescheduled) return false;
+      if (rescheduled) {
+        stderr.writeln('Failed to run request ${attempt.request}');
+        return false;
+      }
       if (attempt.numRetries >= _maxRetries) return false;
-      stderr.writeln('Rescheduling request ${attempt.request}');
+      stderr.writeln('Rescheduling failed request...');
       rescheduled = true;
       attempt.numRetries++;
       _workQueue.add(attempt);
